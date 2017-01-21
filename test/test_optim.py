@@ -36,12 +36,12 @@ class TestOptim(TestCase):
         initial_dist = params.data.dist(solution)
 
         def eval():
+            optimizer.zero_grad()
             loss = rosenbrock(params)
             loss.backward()
             return loss
 
         for i in range(2000):
-            optimizer.zero_grad()
             optimizer.step(eval)
             old_fn(lambda _: (rosenbrock(params_t), drosenbrock(params_t)),
                     params_t, state)
@@ -56,21 +56,21 @@ class TestOptim(TestCase):
         optimizer = constructor(weight, bias)
 
         def fn():
+            optimizer.zero_grad()
             y = weight.mv(input)
             if y.is_cuda and bias.is_cuda and y.get_device() != bias.get_device():
                 y = y.cuda(bias.get_device())
-            return (y + bias).abs().sum()
+            loss = (y + bias).abs().sum()
+            loss.backward()
+            return loss
 
         initial_value = fn().data[0]
         for i in range(200):
-            weight.grad.data.zero_()
-            bias.grad.data.zero_()
-            fn().backward()
-            optimizer.step()
+            optimizer.step(fn)
 
-        self.assertLessEqual(fn().data[0], initial_value)
+        self.assertLess(fn().data[0], initial_value)
 
-    def _test_basic_cases(self, constructor):
+    def _test_basic_cases(self, constructor, ignore_multidevice=False):
         self._test_basic_cases_template(
             torch.randn(10, 5),
             torch.randn(10),
@@ -94,12 +94,12 @@ class TestOptim(TestCase):
             constructor
         )
         # Multi-GPU
-        if not torch.cuda.device_count() > 1:
+        if not torch.cuda.device_count() > 1 and not ignore_multidevice:
             return
         self._test_basic_cases_template(
-            torch.randn(10, 5).cuda(),
-            torch.randn(10).cuda(),
-            torch.randn(5).cuda(),
+            torch.randn(10, 5).cuda(0),
+            torch.randn(10).cuda(1),
+            torch.randn(5).cuda(0),
             constructor
         )
 
@@ -273,6 +273,19 @@ class TestOptim(TestCase):
             lambda weight, bias: optim.Rprop(
                 self._build_params_dict(weight, bias, lr=1e-2),
                 lr=1e-3)
+        )
+
+    def test_lbfgs(self):
+        self._test_rosenbrock(
+            lambda params: optim.LBFGS(params),
+            wrap_old_fn(old_optim.lbfgs)
+        )
+        self._test_rosenbrock(
+            lambda params: optim.LBFGS(params, lr=5e-2),
+            wrap_old_fn(old_optim.lbfgs, learningRate=5e-2)
+        )
+        self._test_basic_cases(
+            lambda weight, bias: optim.LBFGS([weight, bias], lr=5e-2)
         )
 
     def test_invalid_param_type(self):
